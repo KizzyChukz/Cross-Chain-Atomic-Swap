@@ -168,3 +168,89 @@
   )
 )
 
+;; Claim a swap using the hash preimage
+(define-public (claim-swap (swap-id (buff 32)) (preimage (buff 32)))
+  (let (
+    (swap (unwrap! (map-get? swaps { swap-id: swap-id }) (err ERR-SWAP-NOT-FOUND)))
+    (claimer tx-sender)
+  )
+    ;; Validation checks
+    (asserts! (is-eq claimer (get participant swap)) (err ERR-UNAUTHORIZED))
+    (asserts! (not (get claimed swap)) (err ERR-ALREADY-CLAIMED))
+    (asserts! (not (get refunded swap)) (err ERR-INVALID-REFUND))
+    (asserts! (verify-hash preimage (get hash-lock swap)) (err ERR-INVALID-HASH))
+    (asserts! (is-timelock-valid (get time-lock swap)) (err ERR-TIMELOCK-EXPIRED))
+    (asserts! (not (is-swap-expired (get expiration-height swap))) (err ERR-SWAP-EXPIRED))
+    
+    ;; For multi-sig swaps, verify we have enough signatures
+    (if (> (get multi-sig-required swap) u1)
+      (asserts! (verify-multi-sig swap-id (get multi-sig-required swap) (get multi-sig-provided swap)) 
+        (err ERR-INVALID-SIGNATURE))
+      true
+    )
+    
+    ;; Update the swap to claimed status
+    (map-set swaps
+      { swap-id: swap-id }
+      (merge swap { claimed: true })
+    )
+    
+    ;; Return success
+    (ok true)
+  )
+)
+
+;; Refund an expired or unclaimed swap
+(define-public (refund-swap (swap-id (buff 32)))
+  (let (
+    (swap (unwrap! (map-get? swaps { swap-id: swap-id }) (err ERR-SWAP-NOT-FOUND)))
+    (refunder tx-sender)
+  )
+    ;; Validation checks
+    (asserts! (is-eq refunder (get initiator swap)) (err ERR-UNAUTHORIZED))
+    (asserts! (not (get claimed swap)) (err ERR-ALREADY-CLAIMED))
+    (asserts! (not (get refunded swap)) (err ERR-INVALID-REFUND))
+    (asserts! (is-swap-expired (get expiration-height swap)) (err ERR-TIMELOCK-ACTIVE))
+    
+    ;; Update the swap to refunded status
+    (map-set swaps
+      { swap-id: swap-id }
+      (merge swap { refunded: true })
+    )
+    
+    ;; Return success
+    (ok true)
+  )
+)
+
+;; Submit a signature for a multi-sig swap approval
+(define-public (approve-multi-sig-swap (swap-id (buff 32)) (signature (buff 65)))
+  (let (
+    (swap (unwrap! (map-get? swaps { swap-id: swap-id }) (err ERR-SWAP-NOT-FOUND)))
+    (signer tx-sender)
+    (current-height stacks-block-height)
+  )
+    ;; Validate signature (in production, would verify cryptographic signature)
+    (asserts! (or (is-eq signer (get initiator swap)) (is-eq signer (get participant swap))) 
+      (err ERR-UNAUTHORIZED))
+    (asserts! (not (get claimed swap)) (err ERR-ALREADY-CLAIMED))
+    (asserts! (not (get refunded swap)) (err ERR-INVALID-REFUND))
+    (asserts! (not (is-swap-expired (get expiration-height swap))) (err ERR-SWAP-EXPIRED))
+    
+    ;; Record this approval
+    (map-set multi-sig-approvals
+      { swap-id: swap-id, signer: signer }
+      { approved: true, signature-time: current-height }
+    )
+    
+    ;; Update the provided signature count
+    (map-set swaps
+      { swap-id: swap-id }
+      (merge swap { multi-sig-provided: (+ (get multi-sig-provided swap) u1) })
+    )
+    
+    ;; Return success
+    (ok true)
+  )
+)
+
